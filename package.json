@@ -1,0 +1,20 @@
+{
+  "name": "omnichannel-deck",
+  "version": "14.19.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "googleapis": "^189.0.0"
+  },
+  "scripts": {
+    "test": "node test/api.test.mjs",
+    "dev": "vercel dev",
+    "build:css": "tailwindcss -c tailwind.config.cjs -i src/input.css -o public/tailwind.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.19"
+  }
+}
