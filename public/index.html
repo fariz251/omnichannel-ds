@@ -57,6 +57,7 @@
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
       </div>
       <h1 class="text-xl font-bold">Omnichannel Deck <span class="text-xs font-normal text-gray-400 ml-1">v14.19</span></h1>
+      <button id="btnRefresh" type="button" onclick="manualRefresh()" title="Data dicek otomatis tiap 1 menit. Klik untuk muat ulang sekarang." class="ml-2 text-[11px] text-gray-400 hover:text-orange-600 transition flex items-center gap-1"><span id="refreshIcon" class="inline-block">&#10227;</span><span id="lastUpdatedText">Memuat...</span></button>
     </div>
     
     <div class="flex flex-wrap items-center gap-3 w-full lg:w-auto justify-end">
@@ -457,7 +458,7 @@
         success: true,
         dataPesanan: rowsToObjects(t.pesanan), dataPenghasilan: rowsToObjects(t.penghasilan), dataMaster: rowsToObjects(t.master),
         dataWa: rowsToObjects(t.wa), dataIklan: rowsToObjects(t.iklan), dataTiktokTokped: rowsToObjects(t.tiktok),
-        adminOrdersData: admin, adminInfo: raw.adminInfo || null
+        adminOrdersData: admin, adminInfo: raw.adminInfo || null, version: raw.version || null
       };
     }
 
@@ -549,6 +550,12 @@
             worksheet = workbook.Sheets[workbook.SheetNames[0]]; expectedHeaders = ["No. Pesanan", "Status Pesanan", "Alasan Pembatalan", "Status Pembatalan/Pengembalian", "Waktu Pesanan Dibuat", "Waktu Pengiriman Diatur", "Metode Pembayaran", "SKU Induk", "Nama Variasi", "Jumlah", "Harga Setelah Diskon", "Provinsi"]; keyword = 'nopesanan';
           }
 
+          // Jika sheet terpilih tidak punya baris header yang dicari, cari di sheet lain (format laporan Shopee bisa berubah urutan sheet)
+          let sheetUsed = workbook.SheetNames.find(n => workbook.Sheets[n] === worksheet) || workbook.SheetNames[0];
+          if (keyword && fileType !== 'tiktok' && fileType !== 'tokopedia') {
+            const hasHeader = (ws) => { const a = XLSX.utils.sheet_to_json(ws, { header: 1 }); for (let i = 0; i < Math.min(30, a.length); i++) { if (a[i] && a[i].some(c => String(c).toLowerCase().replace(/[^a-z0-9]/g, '').includes(keyword))) return true; } return false; };
+            if (!hasHeader(worksheet)) { const alt = workbook.SheetNames.find(n => hasHeader(workbook.Sheets[n])); if (alt) { worksheet = workbook.Sheets[alt]; sheetUsed = alt; } }
+          }
           const rawArr = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
           let headerIdx = 0; let iklanPeriode = ""; 
           
@@ -559,7 +566,7 @@
                   }
                   
                   let isHeader = false;
-                  let strArr = rawArr[i].map(c => String(c).toLowerCase().replace(/\s+/g, ''));
+                  let strArr = rawArr[i].map(c => String(c).toLowerCase().replace(/[^a-z0-9]/g, ''));
                   
                   if (fileType === 'tiktok' || fileType === 'tokopedia') {
                       if (strArr.includes('tanggal') && (strArr.includes('gmv') || strArr.includes('pesanan') || strArr.some(v => v.includes('gmv')))) { isHeader = true; }
@@ -572,7 +579,8 @@
           }
 
           if (fileType === 'iklan' && !iklanPeriode) iklanPeriode = new Date().toISOString().split('T')[0];
-          rawJson = XLSX.utils.sheet_to_json(worksheet, { range: headerIdx, defval: "", raw: false });
+          const refStart = worksheet['!ref'] ? XLSX.utils.decode_range(worksheet['!ref']).s.r : 0; // range numerik = baris absolut; header:1 = relatif terhadap awal data
+          rawJson = XLSX.utils.sheet_to_json(worksheet, { range: headerIdx + refStart, defval: "", raw: false });
           
           const cleanJson = rawJson.map(row => {
             let newRow = {};
@@ -614,7 +622,12 @@
               return row["No. Pesanan"] !== undefined && String(row["No. Pesanan"]).trim() !== "";
           });
           
-          if(cleanJson.length === 0) { showLoading(false); showToast("Gagal memproses file! Pastikan format sesuai.", true); return; }
+          if(cleanJson.length === 0) {
+            showLoading(false);
+            const hdr = (rawArr[headerIdx] || []).map(c => String(c).trim()).filter(Boolean).slice(0, 12).join(' | ');
+            console.warn('Upload gagal. Sheet:', sheetUsed, 'Semua sheet:', workbook.SheetNames, 'Header terbaca:', hdr);
+            showToast('Gagal memproses file! Pastikan format sesuai. Sheet dibaca: "' + sheetUsed + '". Kolom terbaca: ' + (hdr || '(kosong)'), true); return;
+          }
 
           const CHUNK_SIZE = 500; let chunks = [];
           for (let i = 0; i < cleanJson.length; i += CHUNK_SIZE) { chunks.push(cleanJson.slice(i, i + CHUNK_SIZE)); }
@@ -664,23 +677,58 @@
       }).catch(err => { showLoading(false); if (err.code !== 401) showToast(err.message || "Koneksi gagal", true); });
     }
 
-    function loadDashboardData() {
-      showLoading(true, 'Mengunduh Data Omnichannel', 'Sinkronisasi 4 Platform dan Admin...');
-      apiCall('getData').then(raw => {
-          showLoading(false);
+    // --- MUAT DATA + SINKRONISASI OTOMATIS ---
+    // loadDashboardData(true) = refresh senyap (tanpa layar loading), dipakai polling & tombol refresh.
+    let dataVersionClient = null; let autoRefreshTimer = null; let lastSyncAt = null; let syncInFlight = false;
+    const POLL_MS = 60000;
+
+    function fmtClock(d) { return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+    function setSyncState(state) {
+      const t = document.getElementById('lastUpdatedText'), ic = document.getElementById('refreshIcon'), b = document.getElementById('btnRefresh'); if (!t) return;
+      if (state === 'loading') { t.innerText = 'Memperbarui...'; ic.classList.add('animate-spin'); return; }
+      ic.classList.remove('animate-spin');
+      if (state === 'error') { t.innerText = 'Gagal sinkron' + (lastSyncAt ? ' (terakhir ' + fmtClock(lastSyncAt) + ')' : ''); b.classList.add('text-red-500'); return; }
+      b.classList.remove('text-red-500'); t.innerText = 'Sinkron ' + fmtClock(lastSyncAt);
+    }
+    function markSynced() { lastSyncAt = new Date(); setSyncState('ok'); }
+    function isBusyNow() { return syncInFlight || document.getElementById('loader').style.display === 'flex'; }
+
+    function loadDashboardData(silent) {
+      if (!silent) showLoading(true, 'Mengunduh Data Omnichannel', 'Sinkronisasi 4 Platform dan Admin...');
+      syncInFlight = true; setSyncState('loading');
+      return apiCall('getData').then(raw => {
+          syncInFlight = false; if (!silent) showLoading(false);
           const response = hydrateDashboard(raw);
           if(response.success) {
             globalDataPesanan = response.dataPesanan; globalDataPenghasilan = response.dataPenghasilan;
             globalDataWa = response.dataWa || []; globalDataIklan = response.dataIklan || [];
             globalDataTiktokTokped = response.dataTiktokTokped || []; globalDataMaster = response.dataMaster || []; 
             globalAdminOrders = response.adminOrdersData || {}; globalAdminInfo = response.adminInfo || null;
+            dataVersionClient = response.version || null;
             
             hppDictCache = {};
             globalDataMaster.forEach(row => { let hppVal = parseInt(String(row["HPP (Modal)"]).replace(/[^0-9]/g, '')) || 0; hppDictCache[`${String(row["SKU Induk"]||"").trim()}_${String(row["Nama Variasi"]||"").trim()}`] = hppVal; });
             populateMonthDropdown(globalDataPesanan, globalDataWa, globalDataIklan, globalDataTiktokTokped); applyFilter(); 
-          } else { showToast(response.message, true); }
-      }).catch(err => { showLoading(false); if (err.code !== 401) showToast(err.message || 'Gagal memuat data', true); });
+            markSynced(); startAutoRefresh();
+          } else { setSyncState('error'); if (!silent) showToast(response.message, true); }
+      }).catch(err => { syncInFlight = false; if (!silent) showLoading(false); setSyncState('error'); if (err.code !== 401 && !silent) showToast(err.message || 'Gagal memuat data', true); });
     }
+
+    // Tanya server "ada data baru?" (ringan). Data hanya diunduh ulang kalau versinya berubah.
+    async function checkForUpdates() {
+      if (document.hidden || isBusyNow() || !getPw()) return;
+      try {
+        const r = await apiCall('ping');
+        if (!r || !r.success || !r.version) return;                  // server lama / gagal: abaikan, coba lagi nanti
+        if (r.version !== dataVersionClient) await loadDashboardData(true); else markSynced();
+      } catch (e) { if (e.code !== 401) setSyncState('error'); }
+    }
+    function startAutoRefresh() {
+      if (autoRefreshTimer) return;
+      autoRefreshTimer = setInterval(checkForUpdates, POLL_MS);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden && (!lastSyncAt || Date.now() - lastSyncAt.getTime() > 30000)) checkForUpdates(); });
+    }
+    function manualRefresh() { if (isBusyNow()) return; loadDashboardData(true); }
 
     function populateMonthDropdown(dataShopee, dataWa, dataIklan, dataTT) {
       let months = new Set();
