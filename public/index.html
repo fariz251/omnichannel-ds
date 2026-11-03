@@ -51,12 +51,13 @@
     Notifikasi
   </div>
 
+  <div class="w-full flex justify-center bg-white pt-1.5"><span class="inline-flex items-center gap-1 bg-black text-white text-[10px] leading-none px-2.5 py-1 rounded-full tracking-wide select-none">Built with <span class="text-white">&#9829;</span> frz 2026 v16.2</span></div>
   <nav class="bg-white border-b px-6 py-4 flex flex-col lg:flex-row justify-between items-center sticky top-0 z-40 gap-4">
     <div class="flex items-center gap-2 w-full lg:w-auto">
       <div class="bg-gradient-to-r from-orange-500 to-green-500 text-white p-2 rounded-lg">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
       </div>
-      <h1 class="text-xl font-bold">Omnichannel Deck <span class="text-xs font-normal text-gray-400 ml-1">v14.19</span></h1>
+      <h1 class="text-xl font-bold">Omnichannel Deck <span class="text-xs font-normal text-gray-400 ml-1">v16.2</span></h1>
       <button id="btnRefresh" type="button" onclick="manualRefresh()" title="Data dicek otomatis tiap 1 menit. Klik untuk muat ulang sekarang." class="ml-2 text-[11px] text-gray-400 hover:text-orange-600 transition flex items-center gap-1"><span id="refreshIcon" class="inline-block">&#10227;</span><span id="lastUpdatedText">Memuat...</span></button>
     </div>
     
@@ -582,6 +583,7 @@
           const refStart = worksheet['!ref'] ? XLSX.utils.decode_range(worksheet['!ref']).s.r : 0; // range numerik = baris absolut; header:1 = relatif terhadap awal data
           rawJson = XLSX.utils.sheet_to_json(worksheet, { range: headerIdx + refStart, defval: "", raw: false });
           
+          let skippedSku = 0;
           const cleanJson = rawJson.map(row => {
             let newRow = {};
             for (let key in row) {
@@ -619,7 +621,12 @@
           }).filter(row => {
               if (fileType === 'iklan') return row["Nama Iklan"] !== undefined && String(row["Nama Iklan"]).trim() !== "" && String(row["Nama Iklan"]).toLowerCase() !== "total";
               if (fileType === 'tiktok' || fileType === 'tokopedia') return row["Tanggal"] !== undefined && String(row["Tanggal"]).trim() !== "" && row["Tanggal"] !== "Total";
-              return row["No. Pesanan"] !== undefined && String(row["No. Pesanan"]).trim() !== "";
+              if (!(row["No. Pesanan"] !== undefined && String(row["No. Pesanan"]).trim() !== "")) return false;
+              if (fileType === 'penghasilan') {   // hanya baris berdasarkan Order (invoice); baris per SKU/produk dilewati
+                const lb = String(row["Lihat berdasarkan"] || "").trim().toLowerCase();
+                if (lb !== "" && !(lb.includes("order") || lb.includes("pesanan") || lb.includes("invoice"))) { skippedSku++; return false; }
+              }
+              return true;
           });
           
           if(cleanJson.length === 0) {
@@ -634,7 +641,7 @@
           
           let currentChunk = 0; let totalInserted = 0; let totalUpdated = 0;
           function sendNextChunk() {
-              if (currentChunk >= chunks.length) { showLoading(false); showToast(`Upload Selesai! ${totalInserted} ditambahkan, ${totalUpdated} diupdate.`); document.getElementById('fileInput').value = ''; loadDashboardData(); return; }
+              if (currentChunk >= chunks.length) { showLoading(false); showToast(`Upload Selesai! ${totalInserted} ditambahkan, ${totalUpdated} diupdate.` + (skippedSku ? ` (${skippedSku} baris per-SKU dilewati)` : '')); document.getElementById('fileInput').value = ''; loadDashboardData(); return; }
               let startRow = (currentChunk * CHUNK_SIZE) + 1; let endRow = Math.min((currentChunk + 1) * CHUNK_SIZE, cleanJson.length);
               showLoading(true, `Mengirim ke Database`, `Baris ${startRow} - ${endRow} dari ${cleanJson.length}...`, Math.round((currentChunk / chunks.length) * 100));
               apiCall('upload', { data: chunks[currentChunk], storeName: storeName, fileType: fileType }).then(r => {
@@ -896,7 +903,7 @@
           let labaBersih = data.net - data.totalHpp; 
           labaHtml = `<span class="${labaBersih > 0 ? 'text-indigo-600' : 'text-red-500'} font-black text-sm">Rp ${labaBersih.toLocaleString('id-ID')}</span>`;
         } else if (data.net < 0) {
-          netHtml = `<span class="text-red-600 font-bold">- Rp ${Math.abs(data.net).toLocaleString('id-ID')}</span>`; potHtml = `<span class="text-[10px] text-red-500 font-bold italic">Retur</span>`; labaHtml = `<span class="text-red-500 font-bold">-</span>`; rowClass = "bg-red-50 hover:bg-red-100 transition";
+          netHtml = `<div class="flex flex-col items-end"><span class="text-red-600 font-bold">- Rp ${Math.abs(data.net).toLocaleString('id-ID')}</span><span class="text-[10px] text-red-500 font-bold">RETUR / PENGEMBALIAN</span></div>`; potHtml = `<span class="text-[10px] text-red-500 font-bold italic">Retur</span>`; labaHtml = `<span class="text-red-500 font-bold">-</span>`; rowClass = "bg-red-50 hover:bg-red-100 transition";
         } else {
           netHtml = `<span class="text-red-500 font-bold text-[10px] bg-red-10 px-2 py-1 rounded">BELUM CAIR</span>`; potHtml = `<span class="text-gray-400">-</span>`; labaHtml = `<div class="text-orange-500 font-bold text-[10px] leading-tight">Modal Tertahan:<br>-Rp ${data.totalHpp.toLocaleString('id-ID')}</div>`;
         }
